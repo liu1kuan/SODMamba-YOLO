@@ -138,5 +138,9 @@ __all__ = (
     "CBLinear",
     "Silence",
     "SimpleStem", "VisionClueMerge", "VSSBlock", "XSSBlock"
+    "Silence",
+    "SimpleStem", "VisionClueMerge", "VSSBlock", "XSSBlock",
+    "MSFLMamba"
+)
 )
 from .msfl_mamba import MSFLMamba
