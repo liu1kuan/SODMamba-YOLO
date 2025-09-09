@@ -139,3 +139,4 @@ __all__ = (
     "Silence",
     "SimpleStem", "VisionClueMerge", "VSSBlock", "XSSBlock"
 )
+from .msfl_mamba import MSFLMamba
