@@ -1,0 +1,43 @@
+nc: 80  # number of classes
+scales:   # [depth, width, max_channels]
+  T: [0.33, 0.25, 1024]
+
+# Scheme A: Pure MSFL in backbone (replace all VSSBlock with MSFLMamba)
+# - P2/P3/P4 use MSFLMamba with backend='deform', use_fft=True, window=8
+# - P5 use MSFLMamba with backend='deform', use_fft=False, window=4 to control compute
+# - Head stays with XSSBlock for clean comparison
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, SimpleStem, [128, 3]]   # 0-P2/4
+  - [-1, 3, MSFLMamba, [True, 8, 2, 'deform']]   # 1 P2 replace VSSBlock
+
+  - [-1, 1, VisionClueMerge, [256]]      # 2 p3/8
+  - [-1, 3, MSFLMamba, [True, 8, 2, 'deform']]    # 3 P3 replace VSSBlock
+
+  - [-1, 1, VisionClueMerge, [512]]      # 4 p4/16
+  - [-1, 9, MSFLMamba, [True, 8, 2, 'deform']]    # 5 P4 replace VSSBlock (9 repeats)
+
+  - [-1, 1, VisionClueMerge, [1024]]      # 6 p5/32
+  - [-1, 3, MSFLMamba, [False, 4, 2, 'deform']]   # 7 P5 replace VSSBlock
+
+  - [-1, 1, SPPF, [1024, 5]]               # 8
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 5], 1, Concat, [1]]  # cat backbone P4
+  - [-1, 3, XSSBlock, [512]]  # 11
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 3], 1, Concat, [1]]  # cat backbone P3
+  - [-1, 3, XSSBlock, [256]]  # 14 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 11], 1, Concat, [1]]  # cat head P4
+  - [-1, 3, XSSBlock, [512]]  # 17 (P4/16-medium)
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 8], 1, Concat, [1]]  # cat head P5
+  - [-1, 3, XSSBlock, [1024]]  # 20 (P5/32-large)
+
+  - [[14, 17, 20], 1, Detect, [nc]]  # Detect(P3, P4, P5)
