@@ -55,7 +55,15 @@ from ultralytics.nn.modules import (
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
-from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss
+import os
+from ultralytics.utils.loss import (
+    v8ClassificationLoss,
+    v8DetectionLoss,
+    v8DetectionLossSWD,
+    v8OBBLoss,
+    v8PoseLoss,
+    v8SegmentationLoss,
+)
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (
     fuse_conv_and_bn,
@@ -357,6 +365,19 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
+        # Toggle SWD loss via args.loss == 'swd' or env LOSS=swD
+        try:
+            loss_name = None
+            if hasattr(self, 'args'):
+                if isinstance(self.args, dict):
+                    loss_name = self.args.get('loss')
+                else:
+                    loss_name = getattr(self.args, 'loss', None)
+            loss_name = (loss_name or os.getenv('LOSS') or '').lower()
+            if loss_name == 'swd':
+                return v8DetectionLossSWD(self)
+        except Exception:
+            pass
         return v8DetectionLoss(self)
 
 

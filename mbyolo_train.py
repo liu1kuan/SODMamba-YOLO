@@ -21,6 +21,10 @@ def parse_opt():
     parser.add_argument('--name', default='mambayolo', help='save to project/name')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
+    # Loss toggles
+    parser.add_argument('--loss', type=str, default=os.environ.get('LOSS', 'default'), help='loss type: default|swd')
+    parser.add_argument('--swd-tau', type=float, default=float(os.environ.get('SWD_TAU', 2.0)), help='SWD temperature tau')
+    parser.add_argument('--swd-beta', type=float, default=float(os.environ.get('SWD_BETA', 1.0)), help='SWD scale exponent beta')
     opt = parser.parse_args()
     return opt
 
@@ -38,6 +42,10 @@ if __name__ == '__main__':
         "amp": opt.amp,
         "project": ROOT + opt.project,
         "name": opt.name,
+        # pass-through loss settings so model.args can read them
+        "loss": opt.loss,
+        "swd_tau": opt.__dict__.get('swd_tau', 2.0),
+        "swd_beta": opt.__dict__.get('swd_beta', 1.0),
     }
     model_conf = ROOT + opt.config
     task_type = {

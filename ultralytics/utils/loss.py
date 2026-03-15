@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -128,6 +129,89 @@ class RotatedBboxLoss(BboxLoss):
         return loss_iou, loss_dfl
 
 
+class BboxLossSWD(nn.Module):
+    """Scale-weighted Wasserstein Distance (SWD) bbox loss.
+
+    This loss computes a Gaussian 2-Wasserstein distance between predicted and target axis-aligned
+    boxes under the assumption that an AABB (x1,y1,x2,y2) corresponds to a Gaussian with mean at
+    the box center and diagonal covariance diag(w^2/12, h^2/12). The squared W2 distance between
+    two such Gaussians simplifies to:
+
+        W2^2 = (dx)^2 + (dy)^2 + (dw)^2/12 + (dh)^2/12
+
+    where dx,dy are center differences and dw,dh are width and height differences.
+
+    We map this unbounded distance to a bounded similarity via: hd = sqrt(1 - exp(-W2^2 / tau)),
+    and minimize hd. To emphasize small objects, we apply a scale weight:
+
+        scale_weight = (tau / (area + tau))^beta, where area = w_t * h_t of the target box.
+    """
+
+    def __init__(self, reg_max, use_dfl=False, tau=2.0, beta=1.0):
+        super().__init__()
+        self.reg_max = reg_max
+        self.use_dfl = use_dfl
+        self.tau = float(tau)
+        self.beta = float(beta)
+
+    @staticmethod
+    def _xyxy_to_xywh(x):
+        x1, y1, x2, y2 = x.chunk(4, dim=-1)
+        w = (x2 - x1).clamp_min(1e-6)
+        h = (y2 - y1).clamp_min(1e-6)
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        return torch.cat([cx, cy, w, h], dim=-1)
+
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+        # Classification-aligned weights (same as original YOLOv8 bbox loss)
+        cls_weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+
+        # SWD localization loss
+        p = pred_bboxes[fg_mask]
+        t = target_bboxes[fg_mask]
+        if p.numel() == 0:
+            loss_dfl = torch.tensor(0.0, device=pred_bboxes.device)
+            return torch.tensor(0.0, device=pred_bboxes.device), loss_dfl
+
+        p_xywh = self._xyxy_to_xywh(p)
+        t_xywh = self._xyxy_to_xywh(t)
+
+        dx2 = (p_xywh[..., 0:1] - t_xywh[..., 0:1]).pow(2)
+        dy2 = (p_xywh[..., 1:2] - t_xywh[..., 1:2]).pow(2)
+        dw2 = (p_xywh[..., 2:3] - t_xywh[..., 2:3]).pow(2)
+        dh2 = (p_xywh[..., 3:4] - t_xywh[..., 3:4]).pow(2)
+        w2_swd = dx2 + dy2 + (dw2 + dh2) / 12.0  # W2^2
+
+        # Bounded mapping and scale weighting
+        hd = torch.sqrt((1.0 - torch.exp(-w2_swd / max(self.tau, 1e-6))).clamp(0, 1))  # in [0,1)
+        area = (t_xywh[..., 2:3] * t_xywh[..., 3:4]).clamp_min(1e-6)
+        scale_weight = (self.tau / (area + self.tau)).pow(self.beta)
+
+        loss_iou = (hd * scale_weight * cls_weight).sum() / target_scores_sum
+
+        # DFL loss (reuse original formulation)
+        if self.use_dfl:
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
+            loss_dfl = self._df_loss(pred_dist[fg_mask].view(-1, self.reg_max + 1), target_ltrb[fg_mask]) * cls_weight
+            loss_dfl = loss_dfl.sum() / target_scores_sum
+        else:
+            loss_dfl = torch.tensor(0.0, device=pred_bboxes.device)
+
+        return loss_iou, loss_dfl
+
+    @staticmethod
+    def _df_loss(pred_dist, target):
+        tl = target.long()  # target left
+        tr = tl + 1  # target right
+        wl = tr - target  # weight left
+        wr = 1 - wl  # weight right
+        return (
+            F.cross_entropy(pred_dist, tl.view(-1), reduction="none").view(tl.shape) * wl
+            + F.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
+        ).mean(-1, keepdim=True)
+
+
 class KeypointLoss(nn.Module):
     """Criterion class for computing training losses."""
 
@@ -247,6 +331,28 @@ class v8DetectionLoss:
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
+
+class v8DetectionLossSWD(v8DetectionLoss):
+    """YOLOv8 detection loss variant using SWD for bbox regression."""
+
+    def __init__(self, model):  # model must be de-paralleled
+        super().__init__(model)
+        # Read SWD hyperparameters from model args or environment
+        def _get_arg(name, default):
+            try:
+                if hasattr(model, 'args'):
+                    val = model.args.get(name) if isinstance(model.args, dict) else getattr(model.args, name, None)
+                    if val is not None:
+                        return type(default)(val)
+            except Exception:
+                pass
+            env = os.getenv(name.upper())
+            return type(default)(env) if env is not None else default
+
+        tau = _get_arg('swd_tau', 2.0)
+        beta = _get_arg('swd_beta', 1.0)
+        # Replace bbox loss with SWD variant
+        self.bbox_loss = BboxLossSWD(self.reg_max - 1, use_dfl=self.use_dfl, tau=tau, beta=beta).to(self.device)
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""
